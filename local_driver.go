@@ -9,21 +9,25 @@ import (
 
 	"github.com/cloudfoundry-incubator/voldriver"
 	"code.cloudfoundry.org/lager"
+	"os/exec"
+	"bytes"
+	"path/filepath"
 )
 
-const RootDir = "_volumes/"
+const VolumesRootDir = "_volumes"
+const MountsRootDir = "_mounts"
 
 type LocalDriver struct { // see voldriver.resources.go
-	volumes    map[string]*voldriver.VolumeInfo
-	fileSystem FileSystem
-	mountDir   string
+	volumes        map[string]*voldriver.VolumeInfo
+	fileSystem     FileSystem
+	mountPathRoot  string
 }
 
-func NewLocalDriver(fileSystem FileSystem, mountDir string) *LocalDriver {
+func NewLocalDriver(fileSystem FileSystem, mountPathRoot string) *LocalDriver {
 	return &LocalDriver{
 		volumes:    map[string]*voldriver.VolumeInfo{},
 		fileSystem: fileSystem,
-		mountDir:   mountDir,
+		mountPathRoot:   mountPathRoot,
 	}
 }
 
@@ -51,6 +55,12 @@ func (d *LocalDriver) Create(logger lager.Logger, createRequest voldriver.Create
 	if existingVolume, ok = d.volumes[createRequest.Name]; !ok {
 		logger.Info("creating-volume", lager.Data{"volume_name": createRequest.Name, "volume_id": id.(string)})
 		d.volumes[createRequest.Name] = &voldriver.VolumeInfo{Name: id.(string)}
+
+		// here
+		createDir := d.volumePath(logger, id.(string))
+		logger.Info("creating-volume", lager.Data{"volume": createDir})
+		os.MkdirAll(createDir, os.ModePerm)
+
 		return voldriver.ErrorResponse{}
 	}
 
@@ -88,11 +98,22 @@ func (d *LocalDriver) Mount(logger lager.Logger, mountRequest voldriver.MountReq
 	mountPath := d.mountPath(logger, vol.Name)
 
 	logger.Info("mounting-volume", lager.Data{"id": vol.Name, "mountpoint": mountPath})
-	err := d.fileSystem.MkdirAll(mountPath, os.ModePerm)
+
+	// here
+	volumePath := d.volumePath(logger, vol.Name)
+	logger.Info("link", lager.Data{"src": volumePath, "tgt": mountPath})
+	cmd := exec.Command("ln", "-s",	volumePath, mountPath)
+	err := cmd.Run()
 	if err != nil {
-		logger.Error("failed-creating-mountpoint", err)
+		logger.Error("mount-volume-failed", err)
 		return voldriver.MountResponse{Err: fmt.Sprintf("Error mounting volume: %s", err.Error())}
 	}
+
+	//err := d.fileSystem.MkdirAll(mountPath, os.ModePerm)
+	//if err != nil {
+	//	logger.Error("failed-creating-mountpoint", err)
+	//	return voldriver.MountResponse{Err: fmt.Sprintf("Error mounting volume: %s", err.Error())}
+	//}
 
 	vol.Mountpoint = mountPath
 
@@ -173,12 +194,12 @@ func (d *LocalDriver) Remove(logger lager.Logger, removeRequest voldriver.Remove
 		}
 	}
 
-	mountPath := d.mountPath(logger, vol.Name)
+	mountPath := d.volumePath(logger, vol.Name)
 
-	logger.Info("removing-volume-path", lager.Data{"mountpoint": mountPath})
+	logger.Info("removing-volume", lager.Data{"volume": mountPath})
 	err := d.fileSystem.RemoveAll(mountPath)
 	if err != nil {
-		logger.Error("failed-removing-mount-path", err)
+		logger.Error("failed-removing-volume", err)
 		return voldriver.ErrorResponse{Err: fmt.Sprintf("Failed removing mount path: %s", err)}
 	}
 
@@ -217,16 +238,31 @@ func (d *LocalDriver) exists(path string) (bool, error) {
 }
 
 func (d *LocalDriver) mountPath(logger lager.Logger, volumeId string) string {
-	dir, err := d.fileSystem.Abs(d.mountDir)
+	dir, err := d.fileSystem.Abs(d.mountPathRoot)
 	if err != nil {
-		logger.Fatal("error getting path to executable", err)
+		logger.Fatal("abs-failed", err)
 	}
 
 	if !strings.HasSuffix(dir, "/") {
 		dir = fmt.Sprintf("%s/", dir)
 	}
 
-	return dir + RootDir + volumeId
+	mountsPathRoot := fmt.Sprintf("%s%s", dir, MountsRootDir)
+	d.fileSystem.MkdirAll(mountsPathRoot, os.ModePerm)
+
+	return fmt.Sprintf("%s/%s", mountsPathRoot, volumeId)
+}
+
+func (d *LocalDriver) volumePath(logger lager.Logger, volumeId string) string {
+	dir, err := d.fileSystem.Abs(d.mountPathRoot)
+	if err != nil {
+		logger.Fatal("abs-failed", err)
+	}
+
+	volumesPathRoot := filepath.Join(dir, VolumesRootDir)
+	d.fileSystem.MkdirAll(volumesPathRoot, os.ModePerm)
+
+	return filepath.Join(volumesPathRoot, volumeId)
 }
 
 func (d *LocalDriver) unmount(logger lager.Logger, name string, mountPath string) voldriver.ErrorResponse {
@@ -246,6 +282,16 @@ func (d *LocalDriver) unmount(logger lager.Logger, name string, mountPath string
 	if d.volumes[name].MountCount > 0 {
 		logger.Info("volume-still-in-use", lager.Data{"name": name, "count": d.volumes[name].MountCount})
 		return voldriver.ErrorResponse{}
+	} else {
+		logger.Info("unmount-volume", lager.Data{"mountpath": mountPath})
+		cmd := exec.Command("rm", mountPath)
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		err = cmd.Run()
+		if err != nil {
+			logger.Error("unmount-failed", err)
+			return voldriver.ErrorResponse{Err: fmt.Sprintf("Error mounting volume: %s", err.Error())}
+		}
 	}
 
 	logger.Info("unmounted-volume")
