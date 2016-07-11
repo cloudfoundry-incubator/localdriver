@@ -1,14 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
-	"encoding/json"
 
-	cf_debug_server "code.cloudfoundry.org/debugserver"
-	cf_lager "code.cloudfoundry.org/cflager"
 	cf_http "code.cloudfoundry.org/cfhttp"
+	cf_lager "code.cloudfoundry.org/cflager"
+	cf_debug_server "code.cloudfoundry.org/debugserver"
 	"code.cloudfoundry.org/lager"
 
 	"github.com/cloudfoundry-incubator/localdriver"
@@ -141,6 +141,7 @@ func processRunnerFor(servers grouper.Members) ifrit.Runner {
 
 func createLocalDriverServer(logger lager.Logger, atAddress, driversPath, mountDir string, jsonSpec bool) ifrit.Runner {
 	fileSystem := localdriver.NewRealFileSystem()
+	invoker := localdriver.NewRealInvoker()
 	advertisedUrl := "http://" + atAddress
 	logger.Info("writing-spec-file", lager.Data{"location": driversPath, "name": "localdriver", "address": advertisedUrl})
 	if jsonSpec {
@@ -166,7 +167,8 @@ func createLocalDriverServer(logger lager.Logger, atAddress, driversPath, mountD
 		err := voldriver.WriteDriverSpec(logger, driversPath, "localdriver", "spec", []byte(advertisedUrl))
 		exitOnFailure(logger, err)
 	}
-	client := localdriver.NewLocalDriver(&fileSystem, mountDir)
+
+	client := localdriver.NewLocalDriver(&fileSystem, invoker, mountDir)
 	handler, err := driverhttp.NewHandler(logger, client)
 	exitOnFailure(logger, err)
 
@@ -186,7 +188,8 @@ func createLocalDriverServer(logger lager.Logger, atAddress, driversPath, mountD
 
 func createLocalDriverUnixServer(logger lager.Logger, atAddress, driversPath, mountDir string) ifrit.Runner {
 	fileSystem := localdriver.NewRealFileSystem()
-	client := localdriver.NewLocalDriver(&fileSystem, mountDir)
+	invoker := localdriver.NewRealInvoker()
+	client := localdriver.NewLocalDriver(&fileSystem, invoker, mountDir)
 	handler, err := driverhttp.NewHandler(logger, client)
 	exitOnFailure(logger, err)
 	return http_server.NewUnixServer(atAddress, handler)

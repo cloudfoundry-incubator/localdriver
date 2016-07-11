@@ -7,10 +7,8 @@ import (
 
 	"strings"
 
-	"github.com/cloudfoundry-incubator/voldriver"
 	"code.cloudfoundry.org/lager"
-	"os/exec"
-	"bytes"
+	"github.com/cloudfoundry-incubator/voldriver"
 	"path/filepath"
 )
 
@@ -18,16 +16,18 @@ const VolumesRootDir = "_volumes"
 const MountsRootDir = "_mounts"
 
 type LocalDriver struct { // see voldriver.resources.go
-	volumes        map[string]*voldriver.VolumeInfo
-	fileSystem     FileSystem
-	mountPathRoot  string
+	volumes       map[string]*voldriver.VolumeInfo
+	fileSystem    FileSystem
+	invoker       Invoker
+	mountPathRoot string
 }
 
-func NewLocalDriver(fileSystem FileSystem, mountPathRoot string) *LocalDriver {
+func NewLocalDriver(fileSystem FileSystem, invoker Invoker, mountPathRoot string) *LocalDriver {
 	return &LocalDriver{
-		volumes:    map[string]*voldriver.VolumeInfo{},
-		fileSystem: fileSystem,
-		mountPathRoot:   mountPathRoot,
+		volumes:       map[string]*voldriver.VolumeInfo{},
+		fileSystem:    fileSystem,
+		invoker:       invoker,
+		mountPathRoot: mountPathRoot,
 	}
 }
 
@@ -56,9 +56,8 @@ func (d *LocalDriver) Create(logger lager.Logger, createRequest voldriver.Create
 		logger.Info("creating-volume", lager.Data{"volume_name": createRequest.Name, "volume_id": id.(string)})
 		d.volumes[createRequest.Name] = &voldriver.VolumeInfo{Name: id.(string)}
 
-		// here
 		createDir := d.volumePath(logger, id.(string))
-		logger.Info("creating-volume", lager.Data{"volume": createDir})
+		logger.Info("creating-volume-folder", lager.Data{"volume": createDir})
 		os.MkdirAll(createDir, os.ModePerm)
 
 		return voldriver.ErrorResponse{}
@@ -99,21 +98,15 @@ func (d *LocalDriver) Mount(logger lager.Logger, mountRequest voldriver.MountReq
 
 	logger.Info("mounting-volume", lager.Data{"id": vol.Name, "mountpoint": mountPath})
 
-	// here
 	volumePath := d.volumePath(logger, vol.Name)
+
 	logger.Info("link", lager.Data{"src": volumePath, "tgt": mountPath})
-	cmd := exec.Command("ln", "-s",	volumePath, mountPath)
-	err := cmd.Run()
+	args := []string{"-s", volumePath, mountPath}
+	err := d.invoker.Invoke(logger, "ln", args)
 	if err != nil {
 		logger.Error("mount-volume-failed", err)
 		return voldriver.MountResponse{Err: fmt.Sprintf("Error mounting volume: %s", err.Error())}
 	}
-
-	//err := d.fileSystem.MkdirAll(mountPath, os.ModePerm)
-	//if err != nil {
-	//	logger.Error("failed-creating-mountpoint", err)
-	//	return voldriver.MountResponse{Err: fmt.Sprintf("Error mounting volume: %s", err.Error())}
-	//}
 
 	vol.Mountpoint = mountPath
 
@@ -196,7 +189,7 @@ func (d *LocalDriver) Remove(logger lager.Logger, removeRequest voldriver.Remove
 
 	mountPath := d.volumePath(logger, vol.Name)
 
-	logger.Info("removing-volume", lager.Data{"volume": mountPath})
+	logger.Info("remove-volume-folder", lager.Data{"volume": mountPath})
 	err := d.fileSystem.RemoveAll(mountPath)
 	if err != nil {
 		logger.Error("failed-removing-volume", err)
@@ -266,6 +259,10 @@ func (d *LocalDriver) volumePath(logger lager.Logger, volumeId string) string {
 }
 
 func (d *LocalDriver) unmount(logger lager.Logger, name string, mountPath string) voldriver.ErrorResponse {
+	logger = logger.Session("unmount")
+	logger.Info("start")
+	defer logger.Info("end")
+
 	exists, err := d.exists(mountPath)
 	if err != nil {
 		logger.Error("failed-retrieving-mount-info", err, lager.Data{"mountpoint": mountPath})
@@ -283,11 +280,9 @@ func (d *LocalDriver) unmount(logger lager.Logger, name string, mountPath string
 		logger.Info("volume-still-in-use", lager.Data{"name": name, "count": d.volumes[name].MountCount})
 		return voldriver.ErrorResponse{}
 	} else {
-		logger.Info("unmount-volume", lager.Data{"mountpath": mountPath})
-		cmd := exec.Command("rm", mountPath)
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		err = cmd.Run()
+		logger.Info("unmount-volume-folder", lager.Data{"mountpath": mountPath})
+		args := []string{mountPath}
+		err := d.invoker.Invoke(logger, "rm", args)
 		if err != nil {
 			logger.Error("unmount-failed", err)
 			return voldriver.ErrorResponse{Err: fmt.Sprintf("Error mounting volume: %s", err.Error())}
